@@ -3,6 +3,7 @@ import { Cormorant_Garamond, Inter } from "next/font/google";
 import "./globals.css";
 import Nav from "@/components/Nav";
 import Footer from "@/components/Footer";
+import DragonflySplash from "@/components/DragonflySplash";
 
 const cormorant = Cormorant_Garamond({
   variable: "--font-cormorant",
@@ -41,6 +42,7 @@ export default function RootLayout({
       className={`${cormorant.variable} ${inter.variable} h-full`}
     >
       <body className="min-h-full flex flex-col bg-[#faf8f5] text-[#1a1a1a] antialiased">
+        <DragonflySplash />
         <Nav />
         <main className="flex-1">{children}</main>
         <Footer />
