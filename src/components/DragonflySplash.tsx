@@ -2,20 +2,56 @@
 
 import { useEffect, useRef, useState } from 'react'
 
+/** Preprocess dragonfly JPEG: remove near-black background → true transparency */
+function makeSprite(img: HTMLImageElement): HTMLCanvasElement {
+  const oc = document.createElement('canvas')
+  oc.width = img.naturalWidth
+  oc.height = img.naturalHeight
+  const c = oc.getContext('2d')!
+  c.drawImage(img, 0, 0)
+  const d = c.getImageData(0, 0, oc.width, oc.height)
+  const px = d.data
+  for (let i = 0; i < px.length; i += 4) {
+    const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]
+    if (lum < 18) {
+      px[i + 3] = 0
+    } else if (lum < 60) {
+      px[i + 3] = Math.round(px[i + 3] * (lum - 18) / 42)
+    }
+  }
+  c.putImageData(d, 0, 0)
+  return oc
+}
+
+interface DF {
+  sx: number; sy: number
+  endX: number; endY: number
+  cpX: number; cpY: number
+  size: number
+  rot0: number; rotDelta: number
+  depth: number; phase: number
+  exitDelay: number; flipX: boolean
+}
+
 export default function DragonflySplash() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [fading, setFading] = useState(false)
   const [gone, setGone] = useState(false)
 
   useEffect(() => {
-    if (sessionStorage.getItem('dl_intro_seen')) {
+    // Clear ALL old sessionStorage keys from previous builds to avoid stale skips
+    const CURRENT_KEY = 'dl_v5'
+    ;['dragonfly_shown', 'dl_intro_seen', 'dl_v4'].forEach(k => sessionStorage.removeItem(k))
+
+    if (sessionStorage.getItem(CURRENT_KEY)) {
       setGone(true)
       return
     }
-    sessionStorage.setItem('dl_intro_seen', '1')
+    sessionStorage.setItem(CURRENT_KEY, '1')
 
     const canvas = canvasRef.current
     if (!canvas) return
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     const ctx = canvas.getContext('2d')!
     if (!ctx) return
 
@@ -30,77 +66,85 @@ export default function DragonflySplash() {
 
     const img = new Image()
     img.src = '/dragonfly.jpg'
+    let rafId = 0
+
+    const abort = () => {
+      setFading(true)
+      setTimeout(() => setGone(true), 600)
+    }
+
+    img.onerror = abort
 
     img.onload = () => {
-      // ctx is guaranteed non-null here (checked above)
-      const NUM = 60
-      const IDLE_MS = 700
-      const EXIT_MS = 2000
-      const TOTAL_MS = IDLE_MS + EXIT_MS
-      const aspect = img.width / img.height
+      const sprite = makeSprite(img)
+      const aspect = img.naturalWidth / img.naturalHeight
 
-      interface DF {
-        sx: number; sy: number
-        endX: number; endY: number
-        cpX: number; cpY: number
-        size: number
-        rot0: number; rotDelta: number
-        depth: number
-        phase: number
-        exitDelay: number
-      }
+      const NUM = 70
+      const IDLE_MS = 600
+      const EXIT_MS = 2100
+      const TOTAL_MS = IDLE_MS + EXIT_MS
+      let fadeTriggered = false
 
       const dfs: DF[] = Array.from({ length: NUM }, (_, i) => {
-        // Dense center cluster + outer ring
-        const angle = (i / NUM) * Math.PI * 2 + (Math.random() - 0.5) * 0.4
-        const inner = Math.random() < 0.65
-        const r = inner
-          ? Math.random() * Math.min(W, H) * 0.28
-          : Math.min(W, H) * 0.28 + Math.random() * Math.min(W, H) * 0.25
+        // Swarm distribution: dense center, spread across full viewport
+        let sx: number, sy: number
+        const zone = i / NUM
+        if (zone < 0.45) {
+          // Dense center cluster over hero
+          const a = (i / (NUM * 0.45)) * Math.PI * 2 + (Math.random() - 0.5) * 0.5
+          const r = 30 + Math.random() * Math.min(W, H) * 0.32
+          sx = W / 2 + Math.cos(a) * r * 1.3 + (Math.random() - 0.5) * 70
+          sy = H / 2 + Math.sin(a) * r * 0.8 + (Math.random() - 0.5) * 50
+        } else if (zone < 0.8) {
+          // Scattered across viewport
+          sx = W * 0.05 + Math.random() * W * 0.9
+          sy = H * 0.05 + Math.random() * H * 0.85
+        } else {
+          // Outer swarm near edges for density
+          const edge = Math.floor(Math.random() * 4)
+          if (edge === 0) { sx = Math.random() * W; sy = Math.random() * H * 0.2 }
+          else if (edge === 1) { sx = Math.random() * W; sy = H * 0.8 + Math.random() * H * 0.2 }
+          else if (edge === 2) { sx = Math.random() * W * 0.2; sy = Math.random() * H }
+          else { sx = W * 0.8 + Math.random() * W * 0.2; sy = Math.random() * H }
+        }
 
-        const sx = W / 2 + Math.cos(angle) * r * 1.3 + (Math.random() - 0.5) * 80
-        const sy = H / 2 + Math.sin(angle) * r * 0.85 + (Math.random() - 0.5) * 60
-
-        // Exit outward with slight random deviation
+        // Exit direction: outward from center with organic deviation
         const exitAngle = Math.atan2(sy - H / 2, sx - W / 2) + (Math.random() - 0.5) * 0.6
-        const exitDist = 750 + Math.random() * 800
+        const exitDist = 850 + Math.random() * 750
         const ex = sx + Math.cos(exitAngle) * exitDist
         const ey = sy + Math.sin(exitAngle) * exitDist
 
-        // Bezier arc for organic curved path
-        const mid = 0.4 + Math.random() * 0.2
-        const bx = sx + (ex - sx) * mid
-        const by = sy + (ey - sy) * mid
-        const perp = exitAngle + Math.PI / 2 * (Math.random() > 0.5 ? 1 : -1)
-        const cpDist = 80 + Math.random() * 220
-        const cpX = bx + Math.cos(perp) * cpDist
-        const cpY = by + Math.sin(perp) * cpDist
-
-        const depth = Math.random()
+        // Quadratic bezier control point for curved path
+        const prog = 0.3 + Math.random() * 0.3
+        const bx = sx + (ex - sx) * prog
+        const by = sy + (ey - sy) * prog
+        const perp = exitAngle + (Math.PI / 2) * (Math.random() > 0.5 ? 1 : -1)
+        const cpDist = 60 + Math.random() * 200
+        const depth = 0.15 + Math.random() * 0.85
 
         return {
           sx, sy,
           endX: ex, endY: ey,
-          cpX, cpY,
-          size: 38 + depth * 65 + Math.random() * 18,
+          cpX: bx + Math.cos(perp) * cpDist,
+          cpY: by + Math.sin(perp) * cpDist,
+          size: 28 + depth * 72 + Math.random() * 14,
           rot0: Math.random() * Math.PI * 2,
           rotDelta: (Math.random() - 0.5) * Math.PI * 3.5,
           depth,
           phase: Math.random() * Math.PI * 2,
-          exitDelay: Math.random() * 0.4,
+          exitDelay: Math.random() * 0.45,
+          flipX: Math.random() > 0.5,
         }
       })
 
-      // Paint far dragonflies first, close ones on top
+      // Depth sort: far dragonflies behind close ones
       dfs.sort((a, b) => a.depth - b.depth)
 
-      function easeInCubic(t: number) { return t * t * t }
-      function quadBezier(t: number, p0: number, p1: number, p2: number) {
-        return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * p1 + t * t * p2
-      }
+      const easeIn3 = (t: number) => t * t * t
+      const qBez = (t: number, p0: number, p1: number, p2: number) =>
+        (1 - t) ** 2 * p0 + 2 * (1 - t) * t * p1 + t * t * p2
 
       const startTime = performance.now()
-      let rafId: number
 
       function tick(now: number) {
         const elapsed = now - startTime
@@ -111,56 +155,64 @@ export default function DragonflySplash() {
           let x: number, y: number, rot: number, alpha: number, scaleY: number
 
           if (elapsed < IDLE_MS) {
+            // Idle: gentle organic drift while settling
             const idleT = elapsed / IDLE_MS
-            const amp = 5 + df.depth * 16
+            const amp = 4 + df.depth * 14
             x = df.sx + Math.sin(timeSec * 1.5 + df.phase) * amp
-            y = df.sy + Math.cos(timeSec * 1.1 + df.phase * 1.3) * amp * 0.55
-            rot = df.rot0 + Math.sin(timeSec * 0.9 + df.phase) * 0.1
-            alpha = Math.min(1, idleT * 5) * (0.4 + df.depth * 0.6)
+            y = df.sy + Math.cos(timeSec * 1.2 + df.phase * 1.3) * amp * 0.6
+            rot = df.rot0 + Math.sin(timeSec * 0.8 + df.phase) * 0.09
+            alpha = Math.min(1, idleT * 7) * (0.45 + df.depth * 0.55)
           } else {
+            // Exit: bezier curve outward with stagger
             const exitElapsed = elapsed - IDLE_MS
-            const delayMs = df.exitDelay * EXIT_MS * 0.45
-            const rawT = Math.max(0, (exitElapsed - delayMs) / (EXIT_MS - delayMs))
+            const delayMs = df.exitDelay * EXIT_MS * 0.38
+            const rawT = Math.max(0, (exitElapsed - delayMs) / (EXIT_MS * 0.9))
             const exitT = Math.min(rawT, 1)
-            const easedT = easeInCubic(exitT)
+            const easedT = easeIn3(exitT)
 
-            x = quadBezier(easedT, df.sx, df.cpX, df.endX)
-            y = quadBezier(easedT, df.sy, df.cpY, df.endY)
+            x = qBez(easedT, df.sx, df.cpX, df.endX)
+            y = qBez(easedT, df.sy, df.cpY, df.endY)
             rot = df.rot0 + df.rotDelta * easedT
-
-            // Fade starts at 40% of exit, gone by 100%
+            // Fade as they leave (starts at 35% of exit)
             const fadeT = Math.max(0, (exitT - 0.35) / 0.65)
-            alpha = (1 - fadeT * fadeT) * (0.4 + df.depth * 0.6)
+            alpha = (1 - fadeT * fadeT) * (0.45 + df.depth * 0.55)
           }
 
           if (alpha <= 0.01) return
 
-          // Wing flutter — faster for closer dragonflies
-          const hz = 6 + df.depth * 6
-          scaleY = 1 + Math.sin(timeSec * hz * Math.PI * 2 + df.phase) * 0.13
+          // Wing flutter: faster for closer/larger dragonflies
+          const hz = 5 + df.depth * 7
+          scaleY = 1 + Math.sin(timeSec * hz * Math.PI * 2 + df.phase) * 0.14
+
+          const w = df.size * aspect
+          const h = df.size
 
           ctx.save()
           ctx.globalAlpha = alpha
           ctx.translate(x, y)
           ctx.rotate(rot)
-          ctx.scale(1, scaleY)
-          const w = df.size * aspect
-          const h = df.size
-          ctx.drawImage(img, -w / 2, -h / 2, w, h)
+          ctx.scale(df.flipX ? -1 : 1, scaleY)
+          ctx.drawImage(sprite, -w / 2, -h / 2, w, h)
           ctx.restore()
         })
+
+        // Start fading the overlay at 68% through exit — reveals site as they leave
+        if (elapsed >= IDLE_MS + EXIT_MS * 0.68 && !fadeTriggered) {
+          fadeTriggered = true
+          setFading(true)
+        }
 
         if (elapsed < TOTAL_MS) {
           rafId = requestAnimationFrame(tick)
         } else {
-          setFading(true)
-          setTimeout(() => setGone(true), 850)
+          setTimeout(() => setGone(true), 800)
         }
       }
 
       rafId = requestAnimationFrame(tick)
-      return () => cancelAnimationFrame(rafId)
     }
+
+    return () => { if (rafId) cancelAnimationFrame(rafId) }
   }, [])
 
   if (gone) return null
@@ -171,13 +223,13 @@ export default function DragonflySplash() {
       style={{
         background: '#0d2008',
         opacity: fading ? 0 : 1,
-        transition: fading ? 'opacity 0.85s ease' : 'none',
-        pointerEvents: fading ? 'none' : 'auto',
+        transition: fading ? 'opacity 1s ease' : 'none',
+        pointerEvents: fading ? 'none' : 'all',
       }}
     >
       <canvas
         ref={canvasRef}
-        style={{ display: 'block', mixBlendMode: 'screen' }}
+        style={{ display: 'block' }}
       />
     </div>
   )
